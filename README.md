@@ -195,7 +195,7 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) file for 
 
 ## 👤 Author
 
-Created with ❤️ 
+Created with ❤️ https://t.me/krtlnk
 
 ---
 
