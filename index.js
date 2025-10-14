@@ -105,30 +105,81 @@ async function fetchPageContent(url) {
 }
 
 async function saveLink(userId, url, userNote = '') {
-  const { title, description, content, keywords } = await fetchPageContent(url);
-  const metadata = await generateMetadata({ title, description, content, keywords, url });
-
-  const finalDescription = userNote
-    ? `${userNote}\n\n--- Auto-description ---\n${metadata.summary}`
-    : metadata.summary;
-
   return new Promise((resolve, reject) => {
-    db.run(
-      `INSERT INTO links (user_id, url, title, description, category, tags, keywords, content) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        userId,
-        url,
-        title,
-        finalDescription,
-        metadata.category,
-        metadata.tags.join(', '),
-        metadata.keywords.join(', '),
-        content
-      ],
-      (err) => {
-        if (err) reject(err);
-        else resolve({ title, metadata, userNote });
+    db.get(
+      'SELECT id, title, category, tags FROM links WHERE user_id = ? AND url = ?',
+      [userId, url],
+      async (err, existing) => {
+        if (err) {
+          console.error('❌ DB check error:', err);
+          reject(err);
+          return;
+        }
+
+        if (existing) {
+          console.log('⚠️ Link already exists, id:', existing.id);
+          resolve({ 
+            title: existing.title,
+            metadata: {
+              category: existing.category,
+              tags: existing.tags ? existing.tags.split(', ') : [],
+              summary: 'Already saved'
+            },
+            userNote,
+            alreadyExists: true
+          });
+          return;
+        }
+
+        try {
+          console.log('🔍 Fetching content for:', url);
+          const { title, description, content, keywords } = await fetchPageContent(url);
+          console.log('✅ Content fetched:', { 
+            title: title.substring(0, 50), 
+            descLen: description.length,
+            contentLen: content.length 
+          });
+          
+          console.log('🤖 Generating metadata...');
+          const metadata = await generateMetadata({ title, description, content, keywords, url });
+          console.log('✅ Metadata generated:', {
+            category: metadata.category,
+            tagsCount: metadata.tags.length,
+            tags: metadata.tags,
+            summaryLen: metadata.summary.length
+          });
+
+          const finalDescription = userNote
+            ? `${userNote}\n\n--- Auto-description ---\n${metadata.summary}`
+            : metadata.summary;
+
+          db.run(
+            `INSERT INTO links (user_id, url, title, description, category, tags, keywords, content) 
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              userId,
+              url,
+              title,
+              finalDescription,
+              metadata.category,
+              metadata.tags.join(', '),
+              metadata.keywords.join(', '),
+              content
+            ],
+            function(err) {
+              if (err) {
+                console.error('❌ DB insert error:', err);
+                reject(err);
+              } else {
+                console.log('✅ Link saved to DB with id:', this.lastID);
+                resolve({ title, metadata, userNote, alreadyExists: false });
+              }
+            }
+          );
+        } catch (error) {
+          console.error('❌ saveLink error:', error);
+          reject(error);
+        }
       }
     );
   });
@@ -150,27 +201,51 @@ async function smartSearch(userId, query) {
           return;
         }
 
+        console.log(`🔍 Search query: "${query}" | Total links: ${rows.length}`);
+
         try {
           const indices = await smartSearchAI({ query, links: rows });
+          
           if (!indices.length) {
-            resolve([]);
+            console.warn('⚠️ AI returned no results, trying fallback search');
+            const fallback = rows.filter(r => {
+              const searchText = [
+                r.title || '',
+                r.description || '',
+                r.tags || '',
+                r.keywords || '',
+                r.url || ''
+              ].join(' ').toLowerCase();
+              
+              const queryWords = query.toLowerCase().split(/\s+/);
+              return queryWords.some(word => searchText.includes(word));
+            });
+            
+            console.log(`📋 Fallback found ${fallback.length} results`);
+            resolve(fallback.slice(0, 10));
             return;
           }
 
-          const results = indices.map(i => rows[i]);
+          const results = indices.map(i => rows[i]).filter(Boolean);
+          console.log(`✅ AI search found ${results.length} results`);
           resolve(results);
         } catch (error) {
-          console.error('AI search error:', error.message);
+          console.error('❌ AI search error:', error.message);
 
           const fallback = rows.filter(r => {
             const searchText = [
               r.title || '',
               r.description || '',
               r.tags || '',
-              r.keywords || ''
+              r.keywords || '',
+              r.url || ''
             ].join(' ').toLowerCase();
-            return searchText.includes(query.toLowerCase());
+            
+            const queryWords = query.toLowerCase().split(/\s+/);
+            return queryWords.some(word => searchText.includes(word));
           });
+          
+          console.log(`📋 Error fallback found ${fallback.length} results`);
           resolve(fallback.slice(0, 10));
         }
       }
@@ -238,6 +313,82 @@ bot.action(/lang_(.+)/, async (ctx) => {
   await ctx.editMessageText(t(userId, 'language.changed', lang));
 });
 
+bot.command('debug', async (ctx) => {
+  const userId = ctx.from.id;
+  
+  db.all(
+    'SELECT id, title, category, tags, LENGTH(description) as desc_len, LENGTH(content) as content_len FROM links WHERE user_id = ? ORDER BY created_at DESC LIMIT 5',
+    [userId],
+    (err, rows) => {
+      if (err) {
+        return ctx.reply('❌ DB error: ' + err.message);
+      }
+      
+      if (rows.length === 0) {
+        return ctx.reply('🔍 No links found in DB for your user_id: ' + userId);
+      }
+
+      let msg = `🔍 DEBUG INFO (user_id: ${userId})\n\nLast ${rows.length} links:\n\n`;
+      rows.forEach((r, i) => {
+        msg += `${i + 1}. ID: ${r.id}\n`;
+        msg += `   Title: ${r.title?.substring(0, 50) || 'NULL'}\n`;
+        msg += `   Category: ${r.category || 'NULL'}\n`;
+        msg += `   Tags: ${r.tags || 'NULL'}\n`;
+        msg += `   Desc length: ${r.desc_len || 0}\n`;
+        msg += `   Content length: ${r.content_len || 0}\n\n`;
+      });
+      
+      ctx.reply(msg.substring(0, 4000));
+    }
+  );
+});
+
+bot.command('cleanup', async (ctx) => {
+  const userId = ctx.from.id;
+  
+  db.all(
+    `SELECT url, COUNT(*) as count, GROUP_CONCAT(id) as ids 
+     FROM links 
+     WHERE user_id = ? 
+     GROUP BY url 
+     HAVING count > 1`,
+    [userId],
+    (err, duplicates) => {
+      if (err) {
+        return ctx.reply('❌ Ошибка проверки дубликатов');
+      }
+      
+      if (duplicates.length === 0) {
+        return ctx.reply('✅ Дубликатов не найдено!');
+      }
+      
+      let deleted = 0;
+      let promises = [];
+      
+      duplicates.forEach(dup => {
+        const ids = dup.ids.split(',').map(Number);
+        const keepId = Math.min(...ids);
+        const deleteIds = ids.filter(id => id !== keepId);
+        
+        deleteIds.forEach(id => {
+          promises.push(new Promise((resolve) => {
+            db.run('DELETE FROM links WHERE id = ?', [id], () => {
+              deleted++;
+              resolve();
+            });
+          }));
+        });
+      });
+      
+      Promise.all(promises).then(() => {
+        ctx.reply(`🧹 Удалено ${deleted} дубликатов!\n\n` +
+          `Найдено групп дубликатов: ${duplicates.length}\n` +
+          `Оставлены самые старые версии.`);
+      });
+    }
+  );
+});
+
 bot.command('stats', async (ctx) => {
   const userId = ctx.from.id;
   await loadUserLanguage(userId);
@@ -271,6 +422,7 @@ bot.command('stats', async (ctx) => {
   );
 });
 
+
 bot.on('text', async (ctx) => {
   const text = ctx.message.text.trim();
   const userId = ctx.from.id;
@@ -285,13 +437,37 @@ bot.on('text', async (ctx) => {
 
     const msg = await ctx.reply(t(userId, 'link.processing'));
     try {
-      const { title, metadata, userNote: savedNote } = await saveLink(userId, url, userNote);
-      const tagString = metadata.tags.slice(0, 8).map(tag => `#${tag.replace(/\s/g, '_')}`).join(' ');
+      const result = await saveLink(userId, url, userNote);
+      
+      if (result.alreadyExists) {
+        const tagString = result.metadata.tags.length > 0
+          ? result.metadata.tags.slice(0, 8).map(tag => `#${tag.replace(/\s/g, '_')}`).join(' ')
+          : 'нет тегов';
+        
+        const response = '⚠️ Эта ссылка уже сохранена!\n\n' +
+          t(userId, 'link.title', result.title) +
+          t(userId, 'link.category', result.metadata.category) +
+          t(userId, 'link.tags') + tagString;
+        
+        await ctx.telegram.editMessageText(ctx.chat.id, msg.message_id, null, response);
+        return;
+      }
+
+      const { title, metadata, userNote: savedNote } = result;
       
       let response = t(userId, 'link.saved') +
         t(userId, 'link.title', title) +
-        t(userId, 'link.category', metadata.category) +
-        t(userId, 'link.tags') + tagString;
+        t(userId, 'link.category', metadata.category);
+      
+      if (metadata.tags && metadata.tags.length > 0) {
+        const tagString = metadata.tags
+          .slice(0, 8)
+          .map(tag => `#${tag.replace(/\s/g, '_')}`)
+          .join(' ');
+        response += t(userId, 'link.tags') + tagString;
+      } else {
+        response += t(userId, 'link.tags') + 'нет тегов';
+      }
       
       if (savedNote) response += t(userId, 'link.yourNote', savedNote);
 

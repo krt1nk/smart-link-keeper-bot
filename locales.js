@@ -1,5 +1,3 @@
-// locales.js - Языковые переводы
-
 const locales = {
     en: {
       start: {
@@ -79,7 +77,6 @@ const locales = {
     }
   };
   
-  // Получить перевод для пользователя
   function t(userId, key, ...args) {
     const userLang = getUserLanguage(userId);
     const keys = key.split('.');
@@ -96,7 +93,6 @@ const locales = {
     return value || key;
   }
   
-  // Хранилище языков пользователей (в продакшене лучше использовать БД)
   const userLanguages = new Map();
   
   function getUserLanguage(userId) {
